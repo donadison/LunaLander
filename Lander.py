@@ -95,9 +95,9 @@ class MoonLander:
             self._render_side_thrusters(screen, rotated_points)
             pygame.draw.polygon(screen, ORANGE, rotated_points)
             pygame.draw.lines(screen, GRAY, True, rotated_points, 3)  # Obrys
-            pygame.draw.line(screen, GRAY, rotated_points[1], rotated_points[3], 3)  # Dekoracja
-            pygame.draw.line(screen, GRAY, rotated_points[1], rotated_points[4], 3)  # Dekoracja
-            pygame.draw.line(screen, GRAY, rotated_points[2], rotated_points[4], 3)  # Dekoracja
+            pygame.draw.line(screen, GRAY, rotated_points[1], rotated_points[3], 2)  # Dekoracja
+            pygame.draw.line(screen, GRAY, rotated_points[1], rotated_points[4], 2)  # Dekoracja
+            pygame.draw.line(screen, GRAY, rotated_points[2], rotated_points[4], 2)  # Dekoracja
         else:
             print("Błąd: Wykryto nieprawidłowe punkty w rotated_points.")
 
