@@ -36,7 +36,7 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
 
         # Replay memory
-        self.memory = deque(maxlen=10000)
+        self.memory = deque(maxlen=50000)
 
         # Other hyperparameters
         self.gamma = 0.95  # Discount rate
@@ -46,20 +46,21 @@ class DQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state, episode_num=None):
-        # Increment steps
-
         if episode_num is not None:
-            if episode_num < 0.2 * self.max_steps:  # Initial exploration phase (first 20%)
-                self.epsilon = max(self.epsilon_end,self.epsilon_start - (episode_num / (0.2 * self.max_steps)) * (self.epsilon_start - 0.5))  # Decay to 0.5
-            elif episode_num < 0.8 * self.max_steps:  # Middle phase (20%-80%)
-                self.epsilon = max(self.epsilon_end,0.5 - ((episode_num - 0.2 * self.max_steps) / (0.6 * self.max_steps)) * (0.5 - self.epsilon_end))
-            else:  # Final phase (80%-100%)
-                self.epsilon = self.epsilon_end
+            # Define the decay factor and adjust the range dynamically
+            decay_rate = -np.log(self.epsilon_end / self.epsilon_start) / self.max_steps
+            self.epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * np.exp(
+                -decay_rate * episode_num)
 
         state = torch.FloatTensor(state).to(self.device)
-        with torch.no_grad():
-            act_values = self.model(state)
-        return act_values.cpu().argmax().item()
+        if np.random.rand() < self.epsilon:
+            # Explore: randomly choose an action
+            return np.random.choice(self.action_size)
+        else:
+            # Exploit: choose the best action from the model
+            with torch.no_grad():
+                act_values = self.model(state)
+            return act_values.cpu().argmax().item()
 
     def replay(self, batch_size):
         if len(self.memory) < batch_size:
@@ -86,8 +87,8 @@ class DQNAgent:
         # Compute target Q-values
         expected_q_values = rewards + (1 - dones) * self.gamma * next_q_values
 
-        # Compute loss
-        loss = F.mse_loss(current_q_values, expected_q_values.detach())
+        # Huber loss
+        loss = F.smooth_l1_loss(current_q_values, expected_q_values.detach(), beta=1.0)
 
         # Optimize the model
         self.optimizer.zero_grad()

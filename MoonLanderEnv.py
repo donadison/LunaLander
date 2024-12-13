@@ -7,13 +7,9 @@ import Background
 import Lander
 import Plotter
 
-# Inicjalizacja Pygame
-pygame.init()
-
-
 # Parametry ekranu
 WIDTH, HEIGHT = 600, 400
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+screen = pygame.display.set_mode((WIDTH, HEIGHT), flags=pygame.HIDDEN)
 pygame.display.set_caption("Moonlander RL")
 
 # Kolory
@@ -26,9 +22,9 @@ BLACK = (0, 0, 0)
 LANDER_SIZE = (20, 30)
 GRAVITY = 0.1
 THRUST = -0.2
-ROTATION_SPEED = 1  # Stopnie na klatkę
-MAX_LANDING_SPEED = 1.0
-MAX_LANDING_ANGLE = 2  # Maksymalny dopuszczalny kąt nachylenia w stopniach
+ROTATION_SPEED = 3  # Stopnie na klatkę
+MAX_LANDING_SPEED = 0.5
+MAX_LANDING_ANGLE = 3  # Maksymalny dopuszczalny kąt nachylenia w stopniach
 
 # Parametry platformy
 PLATFORM_WIDTH = 50
@@ -59,9 +55,8 @@ class MoonLanderEnv:
         # Reward configuration (can be tuned)
         self.reward_config = {
             'distance_weight': 1,
-            'speed_weight': 0.2,
-            'angle_weight': 0.1,
-            'landing_weight': 0.15
+            'speed_weight': 1,
+            'angle_weight': 0.5
         }
         self.reason = "Brak powodu"
         self.time_limit = 500  # Maximum steps per episode
@@ -98,21 +93,28 @@ class MoonLanderEnv:
 
         # Aktualizuj lądownik
         self.lander.update(thrust, rotation, GRAVITY, self.wind, left_action, right_action)
+        self.reward = self.calculate_distance_reward()
 
         if self.lander.pos[1] < 0:
             self.done = True
-            self.reward += self.calculate_distance_reward()
+            self.reward -= 100
             self.reason = "Kowboj przesadził i poleciał prosto w gwiazdy! Orbitę opuścił szybciej niż pędzący meteoryt."
 
         if self.lander.pos[0] < 0 or self.lander.pos[0] + self.lander.size[0] > WIDTH:
             self.done = True
-            self.reward += self.calculate_distance_reward()
+            self.reward -= 100
             self.reason = "Dziki zachód wymaga dzikiej precyzji, kowboju!"
 
         if self.moon_surface.check_collision(self.lander):
             self.done = True
-            self.reward += self.calculate_distance_reward()
+            self.reward -= 100
             self.reason = "Kowboj wpadł na skały jak kaktus w burzę piaskową!"
+
+        # Check if the time limit has been reached
+        if self.step_count >= self.time_limit:
+            self.done = True
+            self.reward -= 50
+            self.reason = "Czas się skończył, kowboju! Nie wykonano misji na czas."
 
         # Sprawdź kolizję z platformą
         if (
@@ -121,14 +123,7 @@ class MoonLanderEnv:
         ):
             self.lander.pos[1] = PLATFORM_POS[1] - self.lander.size[1]
             self.done = True
-            self.reward += self.calculate_distance_reward()
             self._check_landing()
-
-        # Check if the time limit has been reached
-        if self.step_count >= self.time_limit:
-            self.done = True
-            self.reward += self.calculate_distance_reward()
-            self.reason = "Czas się skończył, kowboju! Nie wykonano misji na czas."
 
         return self.get_state(), self.reward, self.reason, self.done
 
@@ -142,20 +137,31 @@ class MoonLanderEnv:
             self.reward += 100
             self.reason = "Howdy, Houston! Lądownik zaparkowany prosto jak w saloonie."
         elif too_fast and not too_tilted:
-            self.reward += 75
+            self.reward += 75 + self.calculate_velocity_penalty()
             self.reason = "Zwolnij kowboju! Platforma ledwo ustała!"
         elif too_tilted and not too_fast:
-            self.reward += 75
+            self.reward += 75 + self.calculate_angle_penalty()
             self.reason = "Krzywo jak dach stodoły po burzy, ale się trzyma!"
         else:
             # Poor landing
-            self.reward += 50
+            self.reward += 75 + self.calculate_angle_penalty() + self.calculate_velocity_penalty()
             self.reason = "Za szybko i za krzywo – lądowanie jak u pijącego szeryfa w miasteczku!"
 
     def calculate_distance_reward(self):
         center_x = PLATFORM_POS[0] + PLATFORM_WIDTH / 2
-        distance_to_center = ((self.lander.pos[0] - center_x) ** 2 + (self.lander.pos[1] - PLATFORM_POS[1]) ** 2) ** 0.5
-        reward = -distance_to_center * self.reward_config['distance_weight']
+        top_y = PLATFORM_POS[1]
+        horizontal_distance = np.abs(self.lander.pos[0] - center_x)  # Horizontal distance to the platform center
+        vertical_distance = np.abs(self.lander.pos[1] - top_y)  # Vertical distance to the top of the platform
+        euclidean_distance = np.sqrt(horizontal_distance ** 2 + vertical_distance ** 2)  # Euclidean distance
+        reward = -euclidean_distance * self.reward_config['distance_weight']  # Negative reward based on distance
+        return reward
+
+    def calculate_angle_penalty(self):
+        reward = -abs(self.lander.angle) * self.reward_config['angle_weight']
+        return reward
+
+    def calculate_velocity_penalty(self):
+        reward = -abs(self.lander.velocity[1]) * self.reward_config['speed_weight']
         return reward
 
     def render(self):
