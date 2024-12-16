@@ -28,7 +28,7 @@ class MoonLander:
         self.right_thrust_strength = 0.0  # Aktualna siła ciągu prawego (0 - 1)
         self.max_thrust_strength = 1.0  # Maksymalna siła ciągu
 
-    def update(self, thrust, rotation, gravity, wind, left_thrust=False, right_thrust=False):
+    def update(self, thrust, rotation, gravity, left_thrust=False, right_thrust=False):
         """
         Aktualizuje pozycję, prędkość i kąt lądownika na podstawie sił wejściowych.
         """
@@ -67,7 +67,6 @@ class MoonLander:
 
         # Zastosuj grawitację i wiatr
         self.velocity[1] += gravity
-        self.velocity[0] += wind
 
         # Zaktualizuj pozycję
         self.pos += self.velocity
@@ -89,7 +88,6 @@ class MoonLander:
             for x, y in self.points
         ]
 
-        # Upewnij się, że rotated_points są poprawnymi krotkami liczb całkowitych
         if len(rotated_points) > 0 and all(isinstance(pt, tuple) and len(pt) == 2 for pt in rotated_points):
             self._render_thruster(screen, rotated_points)
             self._render_side_thrusters(screen, rotated_points)
@@ -156,7 +154,7 @@ class MoonLander:
             right_thruster_pos = rotated_points[4]
 
             # Parametry płomieni silników
-            max_flame_length = 15  # Maksymalna długość płomienia
+            max_flame_length = 20  # Maksymalna długość płomienia
             left_flame_strength = self.left_thrust_strength
             right_flame_strength = self.right_thrust_strength
 
