@@ -62,15 +62,15 @@ class MoonLanderEnv:
         self.reward_config = {
             'distance_weight': 1.0,  # Slight penalty for being far
             'speed_weight': 2.0,  # Increase penalty for high velocity
-            'angle_weight': 2.0,  # Increase penalty for poor alignment
-            'proximity_bonus': 10.0,  # Larger bonus for being close to the platform
+            'angle_weight': 1.0,  # Increase penalty for poor alignment
+            'proximity_bonus': 50.0,  # Larger bonus for being close to the platform
             'alignment_bonus': 25.0,  # Encourage upright landings
             'velocity_bonus': 25.0,  # Encourage slow descents
             'failure_penalty': -100.0,  # Harsher crash penalty
-            'too_fast': 50.0,  # Reward for suboptimal landing
-            'too_tilted': 50.0,  # Reward for suboptimal landing
-            'too_tilted_and_too_fast': 25.0,  # Reduced reward for poor landing
-            'perfect_score': 200.0  # Increased perfect landing reward
+            'too_fast': 75.0,  # Reward for suboptimal landing
+            'too_tilted': 75.0,  # Reward for suboptimal landing
+            'too_tilted_and_too_fast': 50.0,  # Reduced reward for poor landing
+            'perfect_score': 100.0  # Increased perfect landing reward
         }
         self.reason = 0
         self.time_limit = 500  # Maximum steps per episode
@@ -121,7 +121,7 @@ class MoonLanderEnv:
             self.reason = 5
             self.reward += self.reward_config['failure_penalty']
 
-        if self.lander.pos[0] < 0 or self.lander.pos[0] + self.lander.size[0] > WIDTH:  #sides
+        if self.lander.pos[0] < 0 or self.lander.pos[0] + self.lander.size[0] > WIDTH:  # sides
             self.done = True
             self.reason = 6
             self.reward += self.reward_config['failure_penalty']
@@ -129,12 +129,7 @@ class MoonLanderEnv:
         if self.moon_surface.check_collision(self.lander):  # Surface crash
             self.done = True
             self.reason = 7
-
-            # Harsher penalty near the platform
-            if self.distance < 50:
-                self.reward += self.reward_config['failure_penalty'] * 2
-            else:
-                self.reward += self.reward_config['failure_penalty']
+            self.reward += self.reward_config['failure_penalty']
 
         # Check side collisions with the platform
         if (
@@ -168,19 +163,17 @@ class MoonLanderEnv:
         too_fast = abs(self.lander.velocity[1]) > MAX_LANDING_SPEED
         too_tilted = abs(self.lander.angle) > MAX_LANDING_ANGLE
 
-        landing_reward = self.reward_config['perfect_score']
-
         if not too_fast and not too_tilted:  # Perfect landing
-            self.reward += landing_reward
+            self.reward += self.reward_config['perfect_score']
             self.reason = 1
         elif too_fast and not too_tilted:  # Too fast but aligned
-            self.reward += landing_reward * 0.5
+            self.reward += self.reward_config['too_fast']
             self.reason = 2
         elif too_tilted and not too_fast:  # Too tilted but slow
-            self.reward += landing_reward * 0.5
+            self.reward += self.reward_config['too_tilted']
             self.reason = 3
         else:  # Both too fast and too tilted
-            self.reward += landing_reward * 0.25
+            self.reward += self.reward_config['too_tilted_and_too_fast']
             self.reason = 4
 
     def calculate_distance(self):
@@ -191,34 +184,52 @@ class MoonLanderEnv:
         return np.sqrt(horizontal_distance ** 2 + vertical_distance ** 2)
 
     def calculate_proximity_reward(self):
-        if self.distance < 50:
-            return self.reward_config['proximity_bonus'] / (self.distance + 1)  # Higher reward when closer
-        return -self.distance * self.reward_config['distance_weight']
+        distance_penalty = -self.distance * self.reward_config['distance_weight']
+        center_x = PLATFORM_POS[0] + PLATFORM_WIDTH / 2
+        top_y = PLATFORM_POS[1]
+        horizontal_distance = abs(self.lander.pos[0] - center_x)
+        vertical_distance = abs(self.lander.pos[1] - top_y)
+
+        distance_penalty -= ((horizontal_distance + vertical_distance) * self.reward_config['distance_weight'])
+
+        if self.distance < 125:
+            distance_penalty += self.reward_config['proximity_bonus'] / (self.distance + 1)
+        return distance_penalty
 
     def calculate_velocity_reward(self):
-        # Only reward when close to the platform
-        if self.distance < 50:
-            vel_x, vel_y = self.lander.velocity
-            total_velocity = np.sqrt(vel_x ** 2 + vel_y ** 2)
+        vel_x, vel_y = self.lander.velocity
+        total_velocity = np.sqrt(vel_x ** 2 + vel_y ** 2)
+        velocity_penalty = -total_velocity * self.reward_config['speed_weight']
 
-            # Reward slow descent
-            if abs(vel_y) < 0.5:
-                return self.reward_config['velocity_bonus']
-            else:
-                # Mild penalty for faster descent but not overly harsh
-                return -min(total_velocity, 2) * self.reward_config['speed_weight']
-        return 0  # No velocity-related rewards/penalties during flight
+        vertical_distance = abs(self.lander.pos[1] - PLATFORM_POS[1])
+
+        # Vertical velocity penalty: stronger when closer to the platform
+        vertical_penalty_factor = 125 / (vertical_distance + 1)
+        velocity_penalty -= abs(vel_y) * vertical_penalty_factor
+
+        # Bonus for controlled vertical velocity when landing
+        if self.distance < 125:
+            velocity_penalty += self.reward_config['velocity_bonus'] / (self.distance + 1)
+
+        return velocity_penalty
 
     def calculate_alignment_reward(self):
-        # Only reward alignment near the platform
-        if self.distance < 50:
-            alignment_penalty = -abs(self.lander.angle) * self.reward_config['angle_weight']
+        # Initialize alignment penalty
+        alignment_penalty = 0
 
-            # Positive reward for maintaining upright alignment
-            if abs(self.lander.angle) < 2:
-                alignment_penalty += self.reward_config['alignment_bonus']
-            return alignment_penalty
-        return 0  # No alignment-related rewards/penalties during flight
+        # Calculate angle penalty if angle exceeds 45 degrees
+        if self.lander.angle > 45:
+            angle_penalty = self.lander.angle * self.reward_config['angle_weight']
+            alignment_penalty -= angle_penalty
+
+        # Bonus for good alignment (small angles and close distance)
+        if self.distance < 125:
+            # Include angle as a multiplier to reduce bonus for large angles
+            angle_factor = max(0, 1 - abs(self.lander.angle / 45))
+            alignment_bonus = self.reward_config['alignment_bonus'] * (1 / self.distance + 1) * angle_factor
+            alignment_penalty += alignment_bonus
+
+        return alignment_penalty
 
     def render(self):
         # Rysowanie tła kosmicznego
