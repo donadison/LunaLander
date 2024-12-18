@@ -7,6 +7,9 @@ import Background
 import Lander
 import Plotter
 
+import gymnasium as gym
+from gymnasium import spaces
+
 # Parametry ekranu
 WIDTH, HEIGHT = 600, 400
 screen = pygame.display.set_mode((WIDTH, HEIGHT), flags=pygame.HIDDEN)
@@ -49,16 +52,23 @@ LANDER_START_POS = get_random_lander_start_pos()
 
 
 # Klasa środowiska
-class MoonLanderEnv:
+class MoonLanderEnv(gym.Env):
     def __init__(self):
+        super().__init__()
+
+
         self.lander = Lander.MoonLander(LANDER_START_POS, LANDER_SIZE)
         self.background = Background.StarryBackground(WIDTH, HEIGHT, num_stars=200)  # 200 gwiazd
         self.moon_surface = Surface.MoonSurface(WIDTH, HEIGHT, max_height=30, roughness=30)
         self.plot = Plotter.Plotter('rewards.csv')
+
+
         self.done = False
         self.reward = 0.0
         self.distance = self.calculate_distance()
+
         # Reward configuration (can be tuned)
+
         self.reward_config = {
             'distance_weight': 1.0,  # Slight penalty for being far
             'speed_weight': 2.0,  # Increase penalty for high velocity
@@ -72,12 +82,28 @@ class MoonLanderEnv:
             'too_tilted_and_too_fast': 50.0,  # Reduced reward for poor landing
             'perfect_score': 100.0  # Increased perfect landing reward
         }
+
+
         self.reason = 0
         self.time_limit = 500  # Maximum steps per episode
         self.step_count = 0  # Step counter
         self.last_action = 0
 
-    def reset(self):
+        # wywołania dla GYMa
+        # Przestrzeń akcji: 0 (brak akcji), 1 (obrót w lewo), 2 (obrót w prawo), 3 (ciąg)
+        self.action_space = spaces.Discrete(4)
+
+        # Przestrzeń stanów: [x, y, v_x, v_y, kąt]
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, -20, -15, -360]),  # Minimalne wartości
+            high=np.array([WIDTH, HEIGHT, 20, 15, 360]),  # Maksymalne wartości
+            dtype=np.float32
+        )
+
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        
         self.lander = Lander.MoonLander(get_random_lander_start_pos(), LANDER_SIZE)
         self.background = Background.StarryBackground(WIDTH, HEIGHT, num_stars=200)
         self.moon_surface = Surface.MoonSurface(WIDTH, HEIGHT, max_height=30, roughness=30)
@@ -87,7 +113,8 @@ class MoonLanderEnv:
         self.distance = self.calculate_distance()
         self.last_action = 0
         self.reason = 0
-        return self.get_state()
+
+        return self.get_state(), {}
 
     def step(self, action):
         self.last_action = action
@@ -157,7 +184,14 @@ class MoonLanderEnv:
             self.reason = 8
             self.reward += self.reward_config['failure_penalty']
 
-        return self.get_state(), self.reward, self.reason, self.done
+                # Określenie czy epizod jest zakończony (terminated)
+        terminated = self.done
+        # Dla uproszczenia, zakładamy, że epizod nie jest "truncated", więc ustawiamy to na False
+        truncated = False
+        # Dodatkowe informacje
+        info = {"reason": self.reason}
+
+        return self.get_state(), self.reward, terminated, truncated, info
 
     def _check_landing(self):
         too_fast = abs(self.lander.velocity[1]) > MAX_LANDING_SPEED
@@ -231,7 +265,7 @@ class MoonLanderEnv:
 
         return alignment_penalty
 
-    def render(self):
+    def render(self, mode="human"):
         # Rysowanie tła kosmicznego
         screen.fill(BLACK)  # Czarne tło dla kosmosu
         self.background.render(screen)
