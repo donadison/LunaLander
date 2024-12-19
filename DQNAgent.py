@@ -1,124 +1,142 @@
-import random
 import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from collections import deque
 import pickle
 import os
 
 import DQNNetwork
+import PrioritizedReplayBuffer
 
 
 class DQNAgent:
     def __init__(self, state_size, action_size, device,
-                 epsilon_start=1.0,
-                 epsilon_end=0.01,
-                 epsilon_decay_rate=0.999,
-                 max_steps=None):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.device = device
-        self.max_steps = max_steps
+                 epsilon_start=0.5,  # Starting exploration probability
+                 epsilon_end=0.05,  # Minimum exploration probability
+                 epsilon_decay_rate=0.999,  # Epsilon decay rate for exploration-exploitation tradeoff
+                 episode_num=None,  # Number of episodes, if provided for epsilon decay
+                 memory_capacity=10000,  # Replay memory capacity, default 10000 steps
+                 target_update_interval=10  # Interval for updating the target network
+                 ):
+        self.state_size = state_size  # Size of the state vector
+        self.action_size = action_size  # Number of possible actions
+        self.device = device  # Device (CPU/GPU)
+        self.episode_num = episode_num  # Total number of episodes, for epsilon decay
 
         # Epsilon exploration parameters
-        self.epsilon_start = epsilon_start
-        self.epsilon = epsilon_start
-        self.epsilon_end = epsilon_end
-        self.epsilon_decay_rate = epsilon_decay_rate
+        self.epsilon_start = epsilon_start  # initial epsilon
+        self.epsilon = epsilon_start  # current epsilon
+        self.epsilon_end = epsilon_end  # minimum epsilon
+        self.epsilon_decay_rate = epsilon_decay_rate  # Decay rate for epsilon
 
-        # Neural network and optimizer
-        self.model = DQNNetwork.DQNNetwork(state_size, action_size).to(device)
-        self.target_model = DQNNetwork.DQNNetwork(state_size, action_size).to(device)
-        self.target_model.load_state_dict(self.model.state_dict())  # Initialize target network
-        self.target_model.eval()  # Target model is in evaluation mode
+        # Primary (online) network and target network
+        self.model = DQNNetwork.DQNNetwork(state_size, action_size).to(device)  # online network
+        self.target_model = DQNNetwork.DQNNetwork(state_size, action_size).to(device)  # Target network
+        self.target_model.load_state_dict(self.model.state_dict())  # Initialize target with primary weights
+        self.target_model.eval()  # Target network is not trained
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)  # Adam optimizer for DQN
 
-        # Replay memory
-        self.memory = deque(maxlen=50000)
+        # Replay memory with prioritized replay
+        self.memory = PrioritizedReplayBuffer.PrioritizedReplayBuffer(capacity=memory_capacity)
 
         # Other hyperparameters
-        self.gamma = 0.95  # Discount rate
-        self.tau = 0.01  # Soft update factor for target network
+        self.gamma = 0.99  # Discount rate
+        self.target_update_interval = target_update_interval  # How often to update the target network
+        self.train_step = 0  # Tracks training steps for updating the target network
 
     def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+        # Compute initial priority (use reward as an approximation for the TD error initially)
+        td_error = abs(reward)  # Initial error estimate
+        self.memory.add(td_error, (state, action, reward, next_state, done))
 
     def act(self, state, episode_num=None):
+        # Epsilon-greedy action selection
         if episode_num is not None:
-            # Define the decay factor and adjust the range dynamically
-            decay_rate = -np.log(self.epsilon_end / self.epsilon_start) / self.max_steps
-            self.epsilon = self.epsilon_end + (self.epsilon_start - self.epsilon_end) * np.exp(
-                -decay_rate * episode_num)
+            # Linearly decrease epsilon
+            self.epsilon = max(
+                self.epsilon_end,  # Ensure epsilon does not go below epsilon_end
+                self.epsilon_start - (episode_num / self.episode_num) * (self.epsilon_start - self.epsilon_end)
+            )
 
-        state = torch.FloatTensor(state).to(self.device)
+        state = torch.FloatTensor(state).to(self.device)  # Convert state to tensor and move to device
+        state = state.unsqueeze(0)  # Add batch dimension
+
+        if episode_num is None:
+            # During testing, always select the action with the highest Q-value
+            with torch.no_grad():
+                act_values = self.model(state)
+            return act_values.cpu().argmax().item()
+
         if np.random.rand() < self.epsilon:
-            # Explore: randomly choose an action
+            # Exploration: randomly select an action
             return np.random.choice(self.action_size)
         else:
-            # Exploit: choose the best action from the model
+            # Exploitation: select the action with the highest predicted Q-value
             with torch.no_grad():
                 act_values = self.model(state)
             return act_values.cpu().argmax().item()
 
     def replay(self, batch_size):
         if len(self.memory) < batch_size:
-            return
+            return  # Not enough experiences to train
 
-        minibatch = random.sample(self.memory, batch_size)
-        states, actions, rewards, next_states, dones = zip(*minibatch)
+        # Sample experiences from the replay buffer using prioritized sampling
+        batch, idxs, is_weights = self.memory.sample(batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
 
-        # Convert to tensors and ensure correct shape
-        states = torch.FloatTensor(np.array(states)).to(self.device).squeeze(1)
+        # Convert to tensors
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
         actions = torch.LongTensor(actions).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device).squeeze(1)
         dones = torch.FloatTensor(dones).to(self.device)
+        is_weights = torch.FloatTensor(is_weights).to(self.device)
 
-        # Compute Q-values for current states
         q_values = self.model(states)
         current_q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
 
-        # Compute next Q-values using the target network
-        next_actions = self.model(next_states).argmax(1)  # Actions from policy network
-        next_q_values = self.target_model(next_states).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+        # Double DQN: Use primary network for action selection and target network for Q-value evaluation
+        with torch.no_grad():
+            next_actions = self.model(next_states).argmax(1)  # Use primary network to select actions
+            next_q_values = self.target_model(next_states).gather(1, next_actions.unsqueeze(1)).squeeze(
+                1)  # Use target network to evaluate Q-values
 
-        # Compute target Q-values
-        expected_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+            expected_q_values = rewards + (1 - dones) * self.gamma * next_q_values  # Compute the target Q-values
 
-        # Huber loss
-        loss = F.smooth_l1_loss(current_q_values, expected_q_values.detach(), beta=1.0)
+        # Compute TD errors and update priorities
+        td_errors = (expected_q_values - current_q_values).detach().cpu().numpy()
+        for idx, td_error in zip(idxs, td_errors):
+            self.memory.update(idx, td_error)
 
-        # Optimize the model
+        # Huber loss for robustness, weighted by importance sampling weights
+        loss = (is_weights * F.smooth_l1_loss(current_q_values, expected_q_values, reduction='none')).mean()
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        # Perform soft updates on target network
-        self.soft_update_target_network()
-
-    def soft_update_target_network(self):
-        """Soft update the target network parameters."""
-        for target_param, local_param in zip(self.target_model.parameters(), self.model.parameters()):
-            target_param.data.copy_(self.tau * local_param.data + (1.0 - self.tau) * target_param.data)
+        # Update target network periodically
+        self.train_step += 1
+        if self.train_step % self.target_update_interval == 0:
+            self.target_model.load_state_dict(self.model.state_dict())  # Hard update
 
     def save(self, filename):
         torch.save(self.model.state_dict(), filename)
 
     def save_memory(self, filename):
         with open(filename, 'wb') as f:
-            pickle.dump(self.memory, f)
+            pickle.dump(self.memory, f)  # Save the replay buffer
         print("Replay memory saved.")
 
     def load(self, filename):
-        self.model.load_state_dict(torch.load(filename))
-        self.target_model.load_state_dict(torch.load(filename))  # Sync target model
+        self.model.load_state_dict(torch.load(filename, weights_only=False))
+        self.target_model.load_state_dict(self.model.state_dict())  # Ensure target network is synchronized
 
     def load_memory(self, filename):
         if os.path.exists(filename):
             with open(filename, 'rb') as f:
-                self.memory = pickle.load(f)
+                self.memory = pickle.load(f)  # Load the replay buffer
             print("Replay memory loaded.")
         else:
             print("Replay memory file not found.")
